@@ -1,0 +1,162 @@
+{
+  "model": {
+    "model_path": "yolov8s.pt",
+    "confidence_threshold": 0.5,
+    "iou_threshold": 0.4,
+    "device": "auto",
+    "image_size": 640,
+    "max_det": 300,
+    "half_precision": false
+  },
+  "video": {
+    "input_source": "",
+    "output_path": "output",
+    "frame_width": 800,
+    "frame_height": 600,
+    "fps_limit": 30,
+    "frame_skip": 3,
+    "save_video": false,
+    "video_codec": "mp4v"
+  },
+  "tracking": {
+    "distance_threshold": 35,
+    "max_disappeared": 10,
+    "min_hits": 3,
+    "max_age": 50,
+    "trajectory_length": 50
+  },
+  "counting": {
+    "entrance_area": [
+      [
+        215,
+        655
+      ],
+      [
+        284,
+        886
+      ],
+      [
+        165,
+        900
+      ],
+      [
+        137,
+        655
+      ]
+    ],
+    "exit_area": [
+      [
+        129,
+        654
+      ],
+      [
+        158,
+        902
+      ],
+      [
+        75,
+        911
+      ],
+      [
+        51,
+        658
+      ]
+    ],
+    "counting_lines": [],
+    "min_residence_time": 0.5,
+    "area_name": "Building"
+  },
+  "alert": {
+    "overcrowding_threshold": 50,
+    "warning_threshold": 20,
+    "notification_interval": 300,
+    "quiet_hours": [
+      22,
+      6
+    ],
+    "emergency_contacts": [
+      "emergency@company.com",
+      "security@company.com"
+    ],
+    "enable_email": true,
+    "enable_slack": false,
+    "enable_discord": false,
+    "enable_webhook": false
+  },
+  "email": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "sender_email": "",
+    "sender_password": "",
+    "use_tls": true,
+    "timeout": 30
+  },
+  "location": {
+    "name": "Emergency Building",
+    "latitude": 37.5665,
+    "longitude": 126.978,
+    "address": "",
+    "timezone": "Asia/Seoul"
+  },
+  "ui": {
+    "window_name": "Emergency Tracker",
+    "show_fps": true,
+    "show_count_info": true,
+    "show_trajectories": false,
+    "info_panel_position": "top_right",
+    "font_scale": 0.6,
+    "line_thickness": 2,
+    "colors": {
+      "entrance_area": [
+        0,
+        255,
+        0
+      ],
+      "exit_area": [
+        0,
+        0,
+        255
+      ],
+      "counting_line": [
+        255,
+        0,
+        255
+      ],
+      "person_box": [
+        255,
+        255,
+        0
+      ],
+      "person_center": [
+        0,
+        255,
+        255
+      ],
+      "trajectory": [
+        255,
+        0,
+        0
+      ],
+      "text_normal": [
+        255,
+        255,
+        255
+      ],
+      "text_warning": [
+        0,
+        255,
+        255
+      ],
+      "text_danger": [
+        0,
+        0,
+        255
+      ],
+      "background": [
+        0,
+        0,
+        0
+      ]
+    }
+  }
+}
