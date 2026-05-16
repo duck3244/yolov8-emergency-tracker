@@ -4,10 +4,13 @@ area_setup.py - 카운팅 영역 대화형 설정 도구
 """
 
 import cv2
+import logging
 import numpy as np
 import json
 import argparse
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class AreaSetupTool:
@@ -52,23 +55,23 @@ class AreaSetupTool:
                     new_width = int(width * scale)
                     new_height = int(height * scale)
                     frame = cv2.resize(frame, (new_width, new_height))
-                
+
                 self.frame = frame
                 return True
             else:
-                print("❌ 비디오에서 프레임을 읽을 수 없습니다.")
+                logger.error("비디오에서 프레임을 읽을 수 없습니다: %s", self.video_path)
                 return False
         else:
             # 웹캠에서 프레임 캡처
             cap = cv2.VideoCapture(0)
             ret, frame = cap.read()
             cap.release()
-            
+
             if ret:
                 self.frame = frame
                 return True
             else:
-                print("❌ 웹캠에서 프레임을 읽을 수 없습니다.")
+                logger.error("웹캠에서 프레임을 읽을 수 없습니다.")
                 return False
     
     def mouse_callback(self, event, x, y, flags, param):
@@ -191,8 +194,8 @@ class AreaSetupTool:
             print(f"✅ 설정이 저장되었습니다: {self.config_path}")
             return True
             
-        except Exception as e:
-            print(f"❌ 설정 저장 실패: {e}")
+        except Exception:
+            logger.exception("설정 저장 실패")
             return False
     
     def run(self):
@@ -259,6 +262,8 @@ class AreaSetupTool:
 
 def main():
     """메인 함수"""
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="카운팅 영역 설정 도구")
     parser.add_argument("--video", "-v", type=str, help="비디오 파일 경로 (없으면 웹캠 사용)")
     parser.add_argument("--config", "-c", type=str, default="config.json", help="설정 파일 경로")

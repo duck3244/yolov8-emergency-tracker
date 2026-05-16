@@ -6,12 +6,16 @@ YOLOv8 기반 긴급상황 객체 추적 시스템의 메인 실행 파일
 import cv2
 import numpy as np
 import argparse
+import logging
 import time
 import signal
 import sys
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 # 커스텀 모듈들 임포트
 from detector import YOLODetector, draw_detections
@@ -47,14 +51,16 @@ class EmergencyTracker:
         self.is_running = False
         self.frame_count = 0
         self.start_time = None
-        
-        # 통계 데이터
+        self.show_display = True  # --no-display 인자로 비활성화
+
+        # 통계 데이터 — 무한 누적 방지를 위해 deque 사용
         self.statistics = {
             'total_frames': 0,
             'total_detections': 0,
-            'processing_times': [],
-            'fps_history': []
+            'processing_times': deque(maxlen=1000),
+            'fps_history': deque(maxlen=100),
         }
+        self.max_inside_seen = 0
         
         # 시그널 핸들러 설정
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -70,19 +76,25 @@ class EmergencyTracker:
             self.detector = YOLODetector(
                 model_path=self.config.model.model_path,
                 confidence_threshold=self.config.model.confidence_threshold,
-                device=self.config.model.device
+                device=self.config.model.device,
+                iou_threshold=self.config.model.iou_threshold,
+                image_size=self.config.model.image_size,
+                max_det=self.config.model.max_det,
+                half_precision=self.config.model.half_precision,
             )
-            
+
             print("🔍 객체 추적기 초기화 중...")
             self.tracker = Tracker(
-                distance_threshold=self.config.tracking.distance_threshold
+                distance_threshold=self.config.tracking.distance_threshold,
+                max_disappeared=self.config.tracking.max_disappeared,
             )
-            
+
             print("📊 카운터 초기화 중...")
             self.counter = AreaCounter(
                 entrance_area=self.config.counting.entrance_area,
                 exit_area=self.config.counting.exit_area,
-                area_name=self.config.counting.area_name
+                area_name=self.config.counting.area_name,
+                min_residence_time=self.config.counting.min_residence_time,
             )
             
             print("🔔 알림 관리자 초기화 중...")
@@ -110,8 +122,8 @@ class EmergencyTracker:
             
             print("✅ 모든 컴포넌트 초기화 완료")
             
-        except Exception as e:
-            print(f"❌ 컴포넌트 초기화 실패: {e}")
+        except Exception:
+            logger.exception("❌ 컴포넌트 초기화 실패")
             sys.exit(1)
     
     def _signal_handler(self, signum, frame):
@@ -292,8 +304,8 @@ class EmergencyTracker:
         # 비디오 캡처 설정
         try:
             cap = self._setup_video_capture()
-        except Exception as e:
-            print(f"❌ 비디오 캡처 설정 실패: {e}")
+        except Exception:
+            logger.exception("❌ 비디오 캡처 설정 실패")
             return
         
         self.is_running = True
@@ -313,69 +325,81 @@ class EmergencyTracker:
             video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
             print(f"📹 비디오 저장 경로: {output_path}")
         
+        # frame_skip 안전장치 — 0 이하면 매 프레임 처리
+        frame_skip = max(1, int(self.config.video.frame_skip or 1))
+        last_result_frame = None
+        last_counts = {}
+
         try:
             while self.is_running:
                 ret, frame = cap.read()
                 if not ret:
-                    if self.config.video.input_source:  # 비디오 파일인 경우
+                    if self.config.video.input_source:
                         print("📹 비디오 파일 재생 완료")
                         break
                     else:
+                        # 웹캠이 일시적으로 응답 없을 때 — 짧게 쉰 뒤 재시도
+                        time.sleep(0.01)
                         continue
-                
+
                 self.frame_count += 1
                 self.statistics['total_frames'] += 1
-                
-                # 프레임 스킵 처리
-                if self.frame_count % self.config.video.frame_skip != 0:
-                    continue
-                
-                # 프레임 크기 조정
+
+                # 프레임 크기 조정 — 매 프레임 일관된 크기 유지
                 if frame.shape[:2] != (self.config.video.frame_height, self.config.video.frame_width):
-                    frame = cv2.resize(frame, (self.config.video.frame_width, self.config.video.frame_height))
-                
-                # 프레임 처리
-                result_frame, counts = self._process_frame(frame)
-                
-                # FPS 계산 및 기록
-                current_fps = self._calculate_fps()
-                if current_fps > 0:
-                    self.statistics['fps_history'].append(current_fps)
-                    if len(self.statistics['fps_history']) > 100:
-                        self.statistics['fps_history'] = self.statistics['fps_history'][-100:]
-                
-                # 알림 확인 및 발송
-                current_inside = counts.get('current_inside', 0)
-                location_info = {
-                    'name': self.config.location.name,
-                    'lat': self.config.location.latitude,
-                    'lon': self.config.location.longitude
-                }
-                
-                self.notification_manager.check_and_send_alerts(
-                    current_inside, location_info
-                )
-                
-                # 결과 표시
-                cv2.imshow(self.config.ui.window_name, result_frame)
-                
-                # 비디오 저장
+                    frame = cv2.resize(
+                        frame,
+                        (self.config.video.frame_width, self.config.video.frame_height),
+                    )
+
+                # 추론은 frame_skip마다, 표시/저장은 매 프레임
+                if self.frame_count % frame_skip == 0:
+                    result_frame, last_counts = self._process_frame(frame)
+                    last_result_frame = result_frame
+
+                    current_fps = self._calculate_fps()
+                    if current_fps > 0:
+                        self.statistics['fps_history'].append(current_fps)
+
+                    self.max_inside_seen = max(
+                        self.max_inside_seen, last_counts.get('current_inside', 0)
+                    )
+
+                    location_info = {
+                        'name': self.config.location.name,
+                        'lat': self.config.location.latitude,
+                        'lon': self.config.location.longitude,
+                    }
+                    self.notification_manager.check_and_send_alerts(
+                        last_counts.get('current_inside', 0), location_info
+                    )
+                else:
+                    location_info = {
+                        'name': self.config.location.name,
+                        'lat': self.config.location.latitude,
+                        'lon': self.config.location.longitude,
+                    }
+
+                # 표시할 프레임 — 추론 안 한 프레임은 직전 결과 재사용
+                display_frame = last_result_frame if last_result_frame is not None else frame
+
                 if video_writer:
-                    video_writer.write(result_frame)
-                
-                # 키보드 입력 처리
-                key = cv2.waitKey(1) & 0xFF
-                if not self._handle_keyboard_input(key, counts, location_info):
-                    break
-                
+                    video_writer.write(display_frame)
+
+                if self.show_display:
+                    cv2.imshow(self.config.ui.window_name, display_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if not self._handle_keyboard_input(key, last_counts, location_info):
+                        break
+
                 # 주기적 상태 출력
-                if self.frame_count % 300 == 0:  # 약 10초마다 (30fps 기준)
-                    self._print_status(counts)
+                if self.frame_count % 300 == 0:
+                    self._print_status(last_counts)
         
         except KeyboardInterrupt:
-            print("\n⚠️  사용자에 의해 중단되었습니다.")
-        except Exception as e:
-            print(f"❌ 실행 중 오류 발생: {e}")
+            logger.warning("사용자에 의해 중단되었습니다.")
+        except Exception:
+            logger.exception("❌ 실행 중 오류 발생")
         finally:
             # 리소스 정리
             cap.release()
@@ -410,7 +434,7 @@ class EmergencyTracker:
             if success:
                 print("✅ 이메일 발송 완료")
             else:
-                print("❌ 이메일 발송 실패")
+                logger.error("이메일 발송 실패")
         
         elif key == ord('m'):  # 지도 생성
             print("🗺️  지도 생성 중...")
@@ -452,9 +476,9 @@ class EmergencyTracker:
             filename = f"emergency_map_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
             self.map_visualizer.save_map(emergency_map, filename, auto_open=True)
             print(f"✅ 지도가 생성되었습니다: {filename}")
-            
-        except Exception as e:
-            print(f"❌ 지도 생성 실패: {e}")
+
+        except Exception:
+            logger.exception("❌ 지도 생성 실패")
     
     def _create_dashboard(self, counts: Dict):
         """대시보드 생성"""
@@ -480,9 +504,9 @@ class EmergencyTracker:
             filename = f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
             self.dashboard_visualizer.save_dashboard(filename, auto_open=True)
             print(f"✅ 대시보드가 생성되었습니다: {filename}")
-            
-        except Exception as e:
-            print(f"❌ 대시보드 생성 실패: {e}")
+
+        except Exception:
+            logger.exception("❌ 대시보드 생성 실패")
     
     def _get_alert_status(self, people_count: int) -> str:
         """알림 상태 반환"""
@@ -499,9 +523,8 @@ class EmergencyTracker:
         return {'정상': 70, '주의': 20, '위험': 10}
     
     def _get_max_occupancy(self) -> int:
-        """최대 동시 수용 인원 반환"""
-        # 실제 구현시에는 세션 중 최대값 추적
-        return max(20, self.counter.get_counts().get('current_inside', 0))
+        """세션 중 관측된 최대 동시 수용 인원 반환"""
+        return max(self.max_inside_seen, self.counter.get_counts().get('current_inside', 0))
     
     def _print_status(self, counts: Dict):
         """현재 상태 출력"""
@@ -572,9 +595,9 @@ class EmergencyTracker:
                 json.dump(stats_data, f, indent=2, ensure_ascii=False, default=str)
             
             print(f"✅ 통계가 저장되었습니다: {stats_file}")
-            
-        except Exception as e:
-            print(f"❌ 통계 저장 실패: {e}")
+
+        except Exception:
+            logger.exception("❌ 통계 저장 실패")
     
     def _save_session_data(self):
         """세션 데이터 저장"""
@@ -586,9 +609,9 @@ class EmergencyTracker:
             
             # 자동 통계 저장
             self._save_statistics()
-            
-        except Exception as e:
-            print(f"❌ 세션 데이터 저장 실패: {e}")
+
+        except Exception:
+            logger.exception("❌ 세션 데이터 저장 실패")
     
     def stop(self):
         """시스템 중지"""
@@ -646,19 +669,32 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def _configure_logging(level: int = logging.INFO):
+    """애플리케이션 전역 로깅 설정 — main()과 다른 진입점에서 호출."""
+    if logging.getLogger().handlers:
+        # 다른 코드가 이미 설정했으면 그대로 둔다
+        return
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
 def main():
     """메인 함수"""
+    _configure_logging()
     print("🚨 YOLOv8 긴급상황 추적 시스템")
     print("=" * 50)
-    
+
     # 명령행 인수 파싱
     args = parse_arguments()
     
     # 시스템 초기화
     try:
         tracker_system = EmergencyTracker(args.config)
-    except Exception as e:
-        print(f"❌ 시스템 초기화 실패: {e}")
+    except Exception:
+        logger.exception("❌ 시스템 초기화 실패")
         sys.exit(1)
     
     # 명령행 인수로 설정 오버라이드
@@ -676,7 +712,10 @@ def main():
     
     if args.save_video:
         tracker_system.config.video.save_video = True
-    
+
+    if args.no_display:
+        tracker_system.show_display = False
+
     # 설정 검증
     config_errors = tracker_system.config.validate_configs()
     if config_errors:
@@ -688,15 +727,13 @@ def main():
         if response.lower() != 'y':
             sys.exit(1)
     
-    # 시스템 실행
     if args.no_display:
         print("🖥️  서버 모드로 실행 (화면 표시 비활성화)")
-        # 서버 모드 구현 (추후 확장 가능)
-    
+
     try:
         tracker_system.run()
-    except Exception as e:
-        print(f"❌ 실행 중 오류: {e}")
+    except Exception:
+        logger.exception("❌ 실행 중 오류")
         sys.exit(1)
     
     print("👋 시스템이 정상적으로 종료되었습니다.")

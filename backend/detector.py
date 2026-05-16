@@ -12,37 +12,44 @@ from pathlib import Path
 
 class YOLODetector:
     """YOLOv8 기반 객체 탐지기"""
-    
-    def __init__(self, model_path="yolov8s.pt", confidence_threshold=0.5, device="auto"):
+
+    def __init__(self, model_path="yolov8s.pt", confidence_threshold=0.5, device="auto",
+                 iou_threshold: float = 0.45, image_size: int = 640,
+                 max_det: int = 300, half_precision: bool = False):
         """
         YOLOv8 탐지기 초기화
-        
+
         Args:
             model_path (str): YOLOv8 모델 파일 경로
             confidence_threshold (float): 신뢰도 임계값
-            device (str): 사용할 디바이스 ("auto", "cpu", "cuda", "mps")
+            device (str): "auto", "cpu", "cuda", "mps"
+            iou_threshold (float): NMS IoU 임계값
+            image_size (int): 추론 입력 크기
+            max_det (int): 한 프레임 최대 검출 수
+            half_precision (bool): FP16(half) 추론 여부 (CUDA에서만 유효)
         """
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
+        self.iou_threshold = iou_threshold
+        self.image_size = image_size
+        self.max_det = max_det
         self.device = self._setup_device(device)
-        
-        # YOLOv8 모델 로드
+        # half는 CUDA에서만 의미가 있음
+        self.half_precision = bool(half_precision) and self.device == "cuda"
+
         self.model = self._load_model()
-        
-        # COCO 클래스 이름
-        self.class_names = [
-            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
-            'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
-            'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
-            'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-            'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-            'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
-            'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
-            'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-            'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
-        ]
-    
+        # 모델 자체의 names dict 사용 — 커스텀 모델 그대로 지원
+        self.class_names = self._extract_class_names(self.model)
+
+    @staticmethod
+    def _extract_class_names(model):
+        names = getattr(model, "names", None)
+        if isinstance(names, dict):
+            return [names[i] for i in sorted(names.keys())]
+        if isinstance(names, (list, tuple)):
+            return list(names)
+        return []
+
     def _setup_device(self, device):
         """디바이스 설정"""
         if device == "auto":
@@ -53,58 +60,57 @@ class YOLODetector:
             else:
                 return "cpu"
         return device
-    
+
     def _load_model(self):
-        """YOLOv8 모델 로드"""
-        try:
-            model = YOLO(self.model_path)
-            print(f"YOLOv8 모델 로드 성공: {self.model_path}")
-            print(f"사용 디바이스: {self.device}")
-            return model
-        except Exception as e:
-            print(f"모델 로딩 실패: {e}")
-            print("기본 YOLOv8s 모델을 다운로드합니다...")
-            model = YOLO('yolov8s.pt')
-            return model
-    
+        """YOLOv8 모델 로드 — 실패 시 예외를 그대로 전파한다."""
+        model = YOLO(self.model_path)
+        print(f"YOLOv8 모델 로드 성공: {self.model_path}")
+        print(f"사용 디바이스: {self.device} (half={self.half_precision})")
+        return model
+
+    def _predict(self, frame):
+        """공통 predict 호출 — config 값들을 모두 전달."""
+        return self.model.predict(
+            frame,
+            conf=self.confidence_threshold,
+            iou=self.iou_threshold,
+            imgsz=self.image_size,
+            device=self.device,
+            half=self.half_precision,
+            max_det=self.max_det,
+            verbose=False,
+        )
+
     def detect(self, frame, target_classes=None, return_confidence=False):
         """
         프레임에서 객체 탐지 수행
-        
-        Args:
-            frame (np.ndarray): 입력 이미지/프레임
-            target_classes (list): 탐지할 클래스 이름 목록 (None이면 모든 클래스)
-            return_confidence (bool): 신뢰도 점수 포함 여부
-            
+
         Returns:
-            list: 탐지 결과 [[x1, y1, x2, y2, class_name, confidence], ...] 또는
-                  [[x1, y1, x2, y2, class_name], ...]
+            list: [[x1, y1, x2, y2, class_name, confidence?], ...]
         """
         if target_classes is None:
             target_classes = self.class_names
-        
-        # YOLOv8으로 탐지 수행
-        results = self.model.predict(frame, verbose=False, conf=self.confidence_threshold)
-        
+
+        results = self._predict(frame)
+
         detections = []
-        
+
         if len(results[0].boxes) > 0:
-            boxes = results[0].boxes.xyxy.cpu().numpy()  # 바운딩 박스 좌표
-            scores = results[0].boxes.conf.cpu().numpy()  # 신뢰도 점수
-            classes = results[0].boxes.cls.cpu().numpy()  # 클래스 인덱스
-            
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            scores = results[0].boxes.conf.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy()
+
             for box, score, cls_idx in zip(boxes, scores, classes):
                 cls_name = self.class_names[int(cls_idx)]
-                
-                # 지정된 클래스만 필터링
+
                 if cls_name in target_classes:
                     x1, y1, x2, y2 = map(int, box)
-                    
+
                     if return_confidence:
                         detections.append([x1, y1, x2, y2, cls_name, float(score)])
                     else:
                         detections.append([x1, y1, x2, y2, cls_name])
-        
+
         return detections
     
     def detect_persons_only(self, frame):
@@ -140,21 +146,27 @@ class YOLODetector:
         """
         # YOLOv8는 기본적으로 NMS가 적용되어 있음
         # 추가적인 후처리가 필요한 경우 사용
-        results = self.model.predict(frame, verbose=False, conf=self.confidence_threshold)
-        
+        results = self._predict(frame)
+
         if len(results[0].boxes) == 0:
             return []
-        
+
         boxes = results[0].boxes.xyxy.cpu().numpy()
         scores = results[0].boxes.conf.cpu().numpy()
         classes = results[0].boxes.cls.cpu().numpy()
-        
-        # OpenCV NMS 적용
+
+        # cv2.dnn.NMSBoxes는 [x, y, w, h] 형식을 기대 — xyxy에서 변환
+        xywh = np.column_stack([
+            boxes[:, 0],
+            boxes[:, 1],
+            boxes[:, 2] - boxes[:, 0],
+            boxes[:, 3] - boxes[:, 1],
+        ])
         indices = cv2.dnn.NMSBoxes(
-            boxes.tolist(), 
-            scores.tolist(), 
-            self.confidence_threshold, 
-            iou_threshold
+            xywh.tolist(),
+            scores.tolist(),
+            self.confidence_threshold,
+            iou_threshold,
         )
         
         detections = []
@@ -314,50 +326,34 @@ def draw_detections(frame, detections, colors=None, show_confidence=True):
 
 
 if __name__ == "__main__":
-    # 테스트 코드
+    # 간단한 웹캠 데모. 자동화된 테스트는 tests/ 디렉토리 참조.
     detector = YOLODetector()
-    
-    # 웹캠 테스트
     cap = cv2.VideoCapture(0)
-    
-    print("YOLOv8 탐지 테스트 시작... 'q'를 눌러 종료")
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # 사람만 탐지
-        detections = detector.detect(frame, target_classes=['person'], return_confidence=True)
-        
-        # 결과 그리기
-        result_frame = draw_detections(frame, detections)
-        
-        # 탐지 개수 표시
-        cv2.putText(
-            result_frame,
-            f"Detected: {len(detections)} persons",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
-        )
-        
-        cv2.imshow("YOLOv8 Detection Test", result_frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    cap.release()
-    cv2.destroyAllWindows()
-    
-    # 성능 벤치마크
-    if cap.isOpened():
-        ret, test_frame = cap.read()
-        if ret:
-            print("\n성능 벤치마크 실행 중...")
-            benchmark_results = detector.benchmark(test_frame)
-            print(f"평균 처리 시간: {benchmark_results['avg_time']:.4f}초")
-            print(f"FPS: {benchmark_results['fps']:.1f}")
-            print(f"디바이스: {benchmark_results['device']}")
+
+    if not cap.isOpened():
+        raise SystemExit("웹캠을 열 수 없습니다.")
+
+    print("YOLOv8 탐지 데모 — 'q'로 종료")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            detections = detector.detect(frame, target_classes=['person'], return_confidence=True)
+            result_frame = draw_detections(frame, detections)
+            cv2.putText(
+                result_frame,
+                f"Detected: {len(detections)} persons",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2,
+            )
+            cv2.imshow("YOLOv8 Detection Test", result_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()

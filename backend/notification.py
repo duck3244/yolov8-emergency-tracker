@@ -732,7 +732,7 @@ class NotificationManager:
     def _should_suppress_alert(self, alert_type: str, current_time: datetime) -> bool:
         """중복 알림 억제 확인"""
         if alert_type in self.last_alert_time:
-            time_diff = (current_time - self.last_alert_time[alert_type]).seconds
+            time_diff = (current_time - self.last_alert_time[alert_type]).total_seconds()
             return time_diff < self.alert_rules['notification_interval']
         return False
 

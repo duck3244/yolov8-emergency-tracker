@@ -5,10 +5,21 @@ config.py - 설정 관리 모듈
 
 import os
 import json
+import logging
 import yaml
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    # 프로젝트 루트의 .env 자동 로드 (이미 설정된 환경변수는 덮어쓰지 않음)
+    load_dotenv()
+except ImportError:
+    # python-dotenv 미설치 시에도 동작은 하도록 — 환경변수만 사용
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -195,6 +206,9 @@ class ConfigManager:
         else:
             # 기본 설정으로 파일 생성
             self.save_config()
+
+        # 환경변수(.env 포함)로 비밀/오버라이드 값 주입
+        self._apply_env_overrides()
     
     def load_config(self, config_path: Optional[str] = None):
         """
@@ -226,6 +240,11 @@ class ConfigManager:
                 self.alert = AlertConfig(**config_data['alert'])
             if 'email' in config_data:
                 self.email = EmailConfig(**config_data['email'])
+                if self.email.sender_password:
+                    logger.warning(
+                        "config.json에 sender_password가 평문으로 저장되어 있습니다. "
+                        ".env 또는 환경변수(SENDER_PASSWORD) 사용을 권장합니다."
+                    )
             if 'location' in config_data:
                 self.location = LocationConfig(**config_data['location'])
             if 'ui' in config_data:
@@ -233,9 +252,8 @@ class ConfigManager:
             
             print(f"설정 파일을 로드했습니다: {self.config_path}")
             
-        except Exception as e:
-            print(f"설정 파일 로드 실패: {e}")
-            print("기본 설정을 사용합니다.")
+        except Exception:
+            logger.exception("설정 파일 로드 실패 — 기본 설정을 사용합니다")
     
     def save_config(self, config_path: Optional[str] = None):
         """
@@ -250,13 +268,17 @@ class ConfigManager:
         # 디렉토리 생성
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         
+        email_dict = asdict(self.email)
+        # 비밀 정보는 디스크에 저장하지 않는다 — .env 또는 환경변수에서 주입
+        email_dict['sender_password'] = ""
+
         config_data = {
             'model': asdict(self.model),
             'video': asdict(self.video),
             'tracking': asdict(self.tracking),
             'counting': asdict(self.counting),
             'alert': asdict(self.alert),
-            'email': asdict(self.email),
+            'email': email_dict,
             'location': asdict(self.location),
             'ui': asdict(self.ui)
         }
@@ -270,10 +292,43 @@ class ConfigManager:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
             
             print(f"설정 파일을 저장했습니다: {self.config_path}")
-            
-        except Exception as e:
-            print(f"설정 파일 저장 실패: {e}")
+
+        except Exception:
+            logger.exception("설정 파일 저장 실패")
     
+    def _apply_env_overrides(self):
+        """환경변수(.env 포함)로 비밀/오버라이드 값 주입.
+
+        디스크에 저장하지 않을 비밀번호 같은 값은 이 단계에서만 메모리에 채워진다.
+        """
+        env = os.environ
+
+        # 이메일 비밀번호 — 절대 디스크에 저장하지 않음
+        if env.get('SENDER_PASSWORD'):
+            self.email.sender_password = env['SENDER_PASSWORD']
+        if env.get('SENDER_EMAIL'):
+            self.email.sender_email = env['SENDER_EMAIL']
+        if env.get('SMTP_SERVER'):
+            self.email.smtp_server = env['SMTP_SERVER']
+        if env.get('SMTP_PORT'):
+            try:
+                self.email.smtp_port = int(env['SMTP_PORT'])
+            except ValueError:
+                logger.warning("SMTP_PORT 환경변수가 정수가 아님: %s", env['SMTP_PORT'])
+
+        # 외부 비밀번호 기반 알림 채널은 env에서만 가져오기
+        if env.get('SLACK_WEBHOOK_URL'):
+            # 알림 매니저에서 직접 참조하도록 별도 보관
+            self.alert.enable_slack = True
+        if env.get('DISCORD_WEBHOOK_URL'):
+            self.alert.enable_discord = True
+
+        # 모델/디바이스 오버라이드
+        if env.get('YOLO_MODEL_PATH'):
+            self.model.model_path = env['YOLO_MODEL_PATH']
+        if env.get('DEVICE'):
+            self.model.device = env['DEVICE']
+
     def update_model_config(self, **kwargs):
         """모델 설정 업데이트"""
         for key, value in kwargs.items():

@@ -13,110 +13,106 @@ import json
 class AreaCounter:
     """영역 기반 입출입 카운터"""
     
-    def __init__(self, entrance_area=None, exit_area=None, area_name="Building"):
+    def __init__(self, entrance_area=None, exit_area=None, area_name="Building",
+                 min_residence_time: float = 0.5):
         """
         카운터 초기화
-        
+
         Args:
             entrance_area (list): 입구 영역 좌표 [(x1, y1), (x2, y2), ...]
             exit_area (list): 출구 영역 좌표 [(x1, y1), (x2, y2), ...]
             area_name (str): 영역 이름
+            min_residence_time (float): FROM 영역에서 머물러야 하는 최소 시간(초).
+                노이즈/순간 잘못된 매칭을 거르기 위한 임계값.
         """
         self.entrance_area = entrance_area or []
         self.exit_area = exit_area or []
         self.area_name = area_name
-        
-        # 추적 상태 관리
-        self.people_in_entrance = {}  # {id: (x, y, timestamp)}
-        self.people_in_exit = {}      # {id: (x, y, timestamp)}
-        
-        # 카운터
-        self.entered_ids = []         # 입장한 객체 ID 목록
-        self.exited_ids = []          # 퇴장한 객체 ID 목록
-        
+
+        # 각 객체의 현재 영역과 진입 시각
+        # current_area[obj_id] ∈ {'entrance', 'exit'}
+        self.current_area: dict = {}
+        self.area_enter_time: dict = {}
+
+        # 카운터 — O(1) 조회를 위해 set 사용
+        self.entered_ids: set = set()
+        self.exited_ids: set = set()
+
         # 통계
-        self.entry_history = []       # 입장 기록 [(id, timestamp), ...]
-        self.exit_history = []        # 퇴장 기록 [(id, timestamp), ...]
-        
-        # 설정
-        self.min_residence_time = 0.5  # 영역 내 최소 머무는 시간 (초)
-        
+        self.entry_history = []
+        self.exit_history = []
+
+        self.min_residence_time = min_residence_time
+
+        self._entrance_poly = (
+            np.array(self.entrance_area, np.int32) if self.entrance_area else None
+        )
+        self._exit_poly = (
+            np.array(self.exit_area, np.int32) if self.exit_area else None
+        )
+
+    def _point_in(self, poly, x, y) -> bool:
+        if poly is None:
+            return False
+        return cv2.pointPolygonTest(poly, (x, y), False) >= 0
+
     def update(self, tracked_objects):
         """
-        추적된 객체들을 기반으로 카운팅 업데이트
-        
+        추적된 객체들을 state machine 방식으로 카운팅.
+
+        규칙:
+            entrance → exit 전이 (FROM 영역에서 min_residence_time 충족): 입장(+1)
+            exit → entrance 전이 (FROM 영역에서 min_residence_time 충족,
+                                  이미 입장한 객체에 한함): 퇴장(+1)
+            영역 밖이거나 두 영역에 동시에 걸친 상태는 직전 상태를 유지한다.
+
         Args:
             tracked_objects (list): [[x1, y1, x2, y2, id], ...]
         """
         current_time = datetime.now()
-        
+
         for obj in tracked_objects:
             x1, y1, x2, y2, obj_id = obj
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-            
-            # 입구 영역 확인
-            if self.entrance_area:
-                is_in_entrance = cv2.pointPolygonTest(
-                    np.array(self.entrance_area, np.int32),
-                    (center_x, center_y),
-                    False
-                ) >= 0
-                
-                if is_in_entrance:
-                    if obj_id not in self.people_in_entrance:
-                        self.people_in_entrance[obj_id] = (center_x, center_y, current_time)
-                else:
-                    # 입구 영역에서 나감
-                    if obj_id in self.people_in_entrance:
-                        del self.people_in_entrance[obj_id]
-            
-            # 출구 영역 확인
-            if self.exit_area:
-                is_in_exit = cv2.pointPolygonTest(
-                    np.array(self.exit_area, np.int32),
-                    (center_x, center_y),
-                    False
-                ) >= 0
-                
-                if is_in_exit:
-                    if obj_id not in self.people_in_exit:
-                        self.people_in_exit[obj_id] = (center_x, center_y, current_time)
-                else:
-                    # 출구 영역에서 나감
-                    if obj_id in self.people_in_exit:
-                        del self.people_in_exit[obj_id]
-        
-        # 입장/퇴장 판정
-        self._check_entries_and_exits()
-    
-    def _check_entries_and_exits(self):
-        """입장/퇴장 조건 확인 및 카운팅"""
-        current_time = datetime.now()
-        
-        # 입장 체크: 입구 영역에 있었다가 출구 영역으로 이동
-        for obj_id in list(self.people_in_exit.keys()):
-            if obj_id in self.people_in_entrance:
-                # 입구에서 출구로 이동 = 입장
-                entrance_time = self.people_in_entrance[obj_id][2]
-                time_diff = (current_time - entrance_time).total_seconds()
-                
-                if time_diff >= self.min_residence_time and obj_id not in self.entered_ids:
-                    self.entered_ids.append(obj_id)
-                    self.entry_history.append((obj_id, current_time))
-                    print(f"[입장] ID {obj_id} - {current_time.strftime('%H:%M:%S')}")
-        
-        # 퇴장 체크: 출구 영역에 있었다가 입구 영역으로 이동
-        for obj_id in list(self.people_in_entrance.keys()):
-            if obj_id in self.people_in_exit and obj_id in self.entered_ids:
-                # 출구에서 입구로 이동 = 퇴장 (이미 입장한 사람만)
-                exit_time = self.people_in_exit[obj_id][2]
-                time_diff = (current_time - exit_time).total_seconds()
-                
-                if time_diff >= self.min_residence_time and obj_id not in self.exited_ids:
-                    self.exited_ids.append(obj_id)
-                    self.exit_history.append((obj_id, current_time))
-                    print(f"[퇴장] ID {obj_id} - {current_time.strftime('%H:%M:%S')}")
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+
+            in_entrance = self._point_in(self._entrance_poly, cx, cy)
+            in_exit = self._point_in(self._exit_poly, cx, cy)
+
+            if in_entrance and not in_exit:
+                new_area = 'entrance'
+            elif in_exit and not in_entrance:
+                new_area = 'exit'
+            else:
+                # 영역 밖이거나 모호한 위치(겹침/없음) — 직전 상태 유지
+                continue
+
+            previous_area = self.current_area.get(obj_id)
+            if previous_area == new_area:
+                # 같은 영역에서 계속 머무는 중 — 상태 변화 없음
+                continue
+
+            # 전이 발생
+            if previous_area is not None:
+                duration = (current_time - self.area_enter_time[obj_id]).total_seconds()
+                if duration >= self.min_residence_time:
+                    self._record_transition(obj_id, previous_area, new_area, current_time)
+
+            self.current_area[obj_id] = new_area
+            self.area_enter_time[obj_id] = current_time
+
+    def _record_transition(self, obj_id, from_area, to_area, current_time):
+        """영역 전이를 입장/퇴장으로 기록."""
+        if from_area == 'entrance' and to_area == 'exit':
+            if obj_id not in self.entered_ids:
+                self.entered_ids.add(obj_id)
+                self.entry_history.append((obj_id, current_time))
+                print(f"[입장] ID {obj_id} - {current_time.strftime('%H:%M:%S')}")
+        elif from_area == 'exit' and to_area == 'entrance':
+            if obj_id in self.entered_ids and obj_id not in self.exited_ids:
+                self.exited_ids.add(obj_id)
+                self.exit_history.append((obj_id, current_time))
+                print(f"[퇴장] ID {obj_id} - {current_time.strftime('%H:%M:%S')}")
     
     def get_counts(self):
         """현재 카운팅 결과 반환"""
@@ -147,10 +143,10 @@ class AreaCounter:
     
     def reset_counts(self):
         """카운트 리셋"""
-        self.entered_ids = []
-        self.exited_ids = []
-        self.people_in_entrance = {}
-        self.people_in_exit = {}
+        self.entered_ids = set()
+        self.exited_ids = set()
+        self.current_area = {}
+        self.area_enter_time = {}
         self.entry_history = []
         self.exit_history = []
     

@@ -1,7 +1,7 @@
 {
   "model": {
     "model_path": "yolov8s.pt",
-    "confidence_threshold": 0.5,
+    "confidence_threshold": 0.6,
     "iou_threshold": 0.4,
     "device": "auto",
     "image_size": 640,
@@ -28,38 +28,38 @@
   "counting": {
     "entrance_area": [
       [
-        215,
-        655
+        441,
+        326
       ],
       [
-        284,
-        886
+        729,
+        327
       ],
       [
-        165,
-        900
+        733,
+        563
       ],
       [
-        137,
-        655
+        461,
+        555
       ]
     ],
     "exit_area": [
       [
-        129,
-        654
+        73,
+        405
       ],
       [
-        158,
-        902
+        80,
+        540
       ],
       [
-        75,
-        911
+        324,
+        526
       ],
       [
-        51,
-        658
+        334,
+        403
       ]
     ],
     "counting_lines": [],
@@ -67,9 +67,9 @@
     "area_name": "Building"
   },
   "alert": {
-    "overcrowding_threshold": 50,
-    "warning_threshold": 20,
-    "notification_interval": 300,
+    "overcrowding_threshold": 1,
+    "warning_threshold": 1,
+    "notification_interval": 1,
     "quiet_hours": [
       22,
       6

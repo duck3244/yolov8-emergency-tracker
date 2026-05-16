@@ -150,26 +150,22 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
-output/output_20250906_192518.mp4
-output/output_20250906_192631.mp4
-output/output_20250906_192917.mp4
-output/output_20250906_193203.mp4
-output/output_20250906_193420.mp4
-output/output_20250906_193625.mp4
-output/session_20250906_192920.json
-output/session_20250906_193206.json
-output/session_20250906_193423.json
-output/session_20250906_193629.json
-output/session_20250906_212655.json
-output/statistics_20250906_192920.json
-output/statistics_20250906_193206.json
-output/statistics_20250906_193423.json
-output/statistics_20250906_193629.json
-output/statistics_20250906_212655.json
-yolov8s.pt
-dataset/video2.mp4
-dataset/sample2.mp4
-dataset/Sample.mp4
+# --- Backend artifacts ---
+backend/output/
+backend/dataset/
+backend/*.pt
+backend/.env
+backend/__pycache__/
+backend/.pytest_cache/
+
+# --- Frontend artifacts ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.local
+
+# --- IDE ---
 .idea/yolov8-emergency-tracker.iml
 .idea/modules.xml
 .idea/misc.xml
